@@ -3,18 +3,60 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import { format, formatDistanceToNow, isValid } from 'date-fns';
 import { FiSend, FiCopy, FiMic, FiTrash2, FiMenu, FiX, FiImage, FiPlus, FiSettings } from 'react-icons/fi';
+import { supabase, apiClient } from './supabaseClient';
+import { useNavigate } from 'react-router-dom';
+import {
+  getConversations,
+  createConversation,
+  updateConversationTitle,
+  deleteConversation,
+  getMessages,
+  addMessage,
+  updateConversationTimestamp
+} from './services/supabaseService';
+import toast from 'react-hot-toast';
 
-// A simple SVG icon to represent Gemini
+// Gemini Icon Component
 const GeminiIcon = () => (
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="bg-gradient-to-br from-blue-400 to-purple-500 rounded-full">
     <path d="M12 4.75L13.4724 9.52763L18.25 11L13.4724 12.4724L12 17.25L10.5276 12.4724L5.75 11L10.5276 9.52763L12 4.75Z" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
 
-
 function App() {
-  // All your state management and refs remain unchanged
+  const [user, setUser] = useState(null);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [isSignedIn, setIsSignedIn] = useState(false);
+  const navigate = useNavigate();
+
+  // Handle token returned from OAuth redirect (e.g. /?token=...)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    if (token) {
+      // Store token and fetch user info from backend
+      localStorage.setItem('authToken', token);
+      (async () => {
+        try {
+          const resp = await apiClient.get('/auth/me');
+          const user = resp.data?.user;
+          if (user) {
+            localStorage.setItem('user', JSON.stringify(user));
+          }
+          // Remove token from URL
+          window.history.replaceState({}, document.title, window.location.pathname);
+          // Navigate to root
+          navigate('/');
+        } catch (err) {
+          console.error('Failed to fetch user after OAuth token:', err);
+        }
+      })();
+    }
+  }, [navigate]);
+
+  // State management
   const [message, setMessage] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
@@ -25,13 +67,15 @@ function App() {
   const [imagePreview, setImagePreview] = useState(null);
   const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
+  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash');
+  const [loading, setLoading] = useState(true);
 
   const chatBoxRef = useRef(null);
   const fileInputRef = useRef(null);
   const recognitionRef = useRef(null);
   const textareaRef = useRef(null);
 
+  // Auto-resize textarea
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -40,24 +84,47 @@ function App() {
     }
   }, [message]);
 
+  // Load conversations when user is authenticated
   useEffect(() => {
-    const savedConversations = localStorage.getItem('conversations');
-    if (savedConversations) {
-      const parsed = JSON.parse(savedConversations);
-      setConversations(parsed);
-      if (parsed.length > 0) {
-        setActiveConversation(parsed[0].id);
-        setChatHistory(parsed[0].messages);
+    const initSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session && session.user) {
+        setUser(session.user);
+        // Persist user (include name/profilePicture) to localStorage
+        try { localStorage.setItem('user', JSON.stringify(session.user)); } catch (e) { /* ignore */ }
+        setIsSignedIn(true);
+        setIsLoaded(true);
+        await loadConversations(session.user.id);
+      } else {
+        setIsSignedIn(false);
+        setIsLoaded(true);
       }
-    } else {
-      createNewConversation();
-    }
+    };
+    initSession();
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, payload) => {
+      if (payload && payload.user) {
+        setUser(payload.user);
+        try { localStorage.setItem('user', JSON.stringify(payload.user)); } catch (e) { /* ignore */ }
+        setIsSignedIn(true);
+        loadConversations(payload.user.id);
+      } else {
+        setUser(null);
+        try { localStorage.removeItem('user'); } catch (e) { /* ignore */ }
+        setIsSignedIn(false);
+      }
+    });
+
+    // no-op unsubscribe (our implementation returns a mock)
+    return () => {};
   }, []);
 
+  // Scroll to bottom when chat history changes
   useEffect(() => {
     scrollToBottom();
   }, [chatHistory, isTyping]);
 
+  // Speech recognition setup
   useEffect(() => {
     if ('webkitSpeechRecognition' in window) {
       recognitionRef.current = new window.webkitSpeechRecognition();
@@ -79,6 +146,54 @@ function App() {
     };
   }, []);
 
+  const loadConversations = async (userIdParam) => {
+    try {
+      setLoading(true);
+      const uid = userIdParam || user?.id;
+      if (!uid) {
+        console.warn('loadConversations called without a user id');
+        return;
+      }
+
+      const userConversations = await getConversations(uid);
+
+      // Ensure each conversation has an `id` field (normalized by service, but double-check)
+      const normalized = userConversations.map(conv => ({
+        ...conv,
+        id: conv.id || conv._id || (conv._id && conv._id.toString())
+      }));
+
+      setConversations(normalized);
+
+      if (normalized.length > 0) {
+        const firstConv = normalized[0];
+        const convId = firstConv.id || firstConv._id || (firstConv._id && firstConv._id.toString());
+        if (convId) {
+          setActiveConversation(convId);
+          await loadMessages(convId);
+        } else {
+          // Fallback: create a new conversation for safety
+          await createNewConversation(uid);
+        }
+      } else {
+        await createNewConversation(uid);
+      }
+    } catch (error) {
+      console.error('Error loading conversations:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadMessages = async (conversationId) => {
+    try {
+      const messages = await getMessages(conversationId);
+      setChatHistory(messages);
+    } catch (error) {
+      console.error('Error loading messages:', error);
+    }
+  };
+
   const scrollToBottom = () => {
     chatBoxRef.current?.scrollTo({ top: chatBoxRef.current.scrollHeight, behavior: 'smooth' });
   };
@@ -93,10 +208,12 @@ function App() {
   };
 
   const generateConversationTitle = async (messages) => {
-    const firstUserMessage = messages.find(msg => msg.sender === 'You')?.text;
+    // messages may come in different shapes (normalized messages from service or UI objects)
+    const firstUserMsgObj = messages.find(msg => msg.sender === 'You' || (msg.role === 'user'));
+    const firstUserMessage = firstUserMsgObj?.text ?? firstUserMsgObj?.content ?? firstUserMsgObj?.text ?? null;
     if (!firstUserMessage) return 'New Chat';
     try {
-      const genAI = new GoogleGenerativeAI(process.env.REACT_APP_API);
+      const genAI = new GoogleGenerativeAI("AIzaSyDkeJJpTY7YRucjjyI1tzWRS4dcpDjYjG0");
       const genModel = genAI.getGenerativeModel({ model: selectedModel });
       const prompt = `Generate a very short title (3-4 words max) for this conversation starter: "${firstUserMessage}"`;
       const result = await genModel.generateContent(prompt);
@@ -109,112 +226,173 @@ function App() {
     }
   };
 
-  const createNewConversation = async () => {
-    const newConversation = { id: Date.now(), title: 'New Chat', messages: [], createdAt: new Date().toISOString() };
-    const updatedConversations = [newConversation, ...conversations];
-    setConversations(updatedConversations);
-    setActiveConversation(newConversation.id);
-    setChatHistory([]);
-    localStorage.setItem('conversations', JSON.stringify(updatedConversations));
-    setMobileSidebarOpen(false);
-    return newConversation.id;
-  };
-
-  const selectConversation = (id) => {
-    const conversation = conversations.find(c => c.id === id);
-    if (conversation) {
-      setActiveConversation(id);
-      setChatHistory(conversation.messages);
-    }
-    setMobileSidebarOpen(false);
-  };
-
-  const deleteConversation = (id, e) => {
-    e.stopPropagation();
-    const updatedConversations = conversations.filter(c => c.id !== id);
-    setConversations(updatedConversations);
-    localStorage.setItem('conversations', JSON.stringify(updatedConversations));
-    if (activeConversation === id) {
-      if (updatedConversations.length > 0) {
-        selectConversation(updatedConversations[0].id);
-      } else {
-        createNewConversation();
+  const createNewConversation = async (userIdParam) => {
+    try {
+      const uid = userIdParam || user?.id;
+      if (!uid) {
+        console.error('Cannot create conversation: no user id');
+        return null;
       }
+
+      const newConversation = await createConversation(uid, 'New Chat');
+      setConversations(prev => [newConversation, ...prev]);
+      setActiveConversation(newConversation.id);
+      setChatHistory([]);
+      setMobileSidebarOpen(false);
+      return newConversation.id;
+    } catch (error) {
+      console.error('Error creating conversation:', error);
+      return null;
     }
   };
 
-  const updateConversationTitle = (id, newTitle) => {
-    const updatedConversations = conversations.map(conv => conv.id === id ? { ...conv, title: newTitle } : conv);
-    setConversations(updatedConversations);
-    localStorage.setItem('conversations', JSON.stringify(updatedConversations));
+  const selectConversation = async (id) => {
+    setActiveConversation(id);
+    await loadMessages(id);
+    setMobileSidebarOpen(false);
+  };
+
+  const deleteConversationHandler = async (id, e) => {
+    e.stopPropagation();
+    try {
+      await deleteConversation(id);
+      setConversations(prev => prev.filter(conv => conv.id !== id));
+
+      if (activeConversation === id) {
+        if (conversations.length > 1) {
+          const remainingConversations = conversations.filter(conv => conv.id !== id);
+          setActiveConversation(remainingConversations[0].id);
+          await loadMessages(remainingConversations[0].id);
+        } else {
+          await createNewConversation();
+        }
+      }
+    } catch (error) {
+      console.error('Error deleting conversation:', error);
+    }
+  };
+
+  const updateConversationTitleHandler = async (id, newTitle) => {
+    try {
+      await updateConversationTitle(id, newTitle);
+      setConversations(prev =>
+        prev.map(conv =>
+          conv.id === id ? { ...conv, title: newTitle } : conv
+        )
+      );
+    } catch (error) {
+      console.error('Error updating conversation title:', error);
+    }
   };
 
   const handleSend = async () => {
     if (!message.trim() && !image) return;
 
-    let currentConvId = activeConversation;
-    if (!currentConvId) {
-      currentConvId = await createNewConversation();
-    }
+    const userMessage = {
+      sender: 'You',
+      text: message,
+      timestamp: new Date(),
+      image: image
+    };
 
-    const userMessage = { sender: 'You', text: message, image: imagePreview, timestamp: new Date().toISOString() };
-    const updatedHistory = [...chatHistory, userMessage];
-    setChatHistory(updatedHistory);
+    // Add user message to chat history
+    setChatHistory(prev => [...prev, userMessage]);
     setMessage('');
     setImage(null);
     setImagePreview(null);
     setIsTyping(true);
 
     try {
-      const genAI = new GoogleGenerativeAI(process.env.REACT_APP_API);
-      const genModel = genAI.getGenerativeModel({ model: selectedModel });
-      let result;
-      if (image) {
-        const imageParts = [{ inlineData: { data: image.split(',')[1], mimeType: 'image/jpeg' } }];
-        const prompt = message || "Describe this image";
-        result = await genModel.generateContent([prompt, ...imageParts]);
-      } else {
-        result = await genModel.generateContent(message);
+      // Ensure we have a conversation id; addMessage will create one if needed and return message
+      const savedUserMessage = await addMessage(activeConversation, userMessage);
+
+      // If activeConversation was null, try to set it from returned message's conversationId
+      if (!activeConversation && savedUserMessage && savedUserMessage.conversationId) {
+        setActiveConversation(savedUserMessage.conversationId);
       }
-      const aiResponse = await result.response.text();
-      const aiMessage = { sender: 'Gemini', text: aiResponse, timestamp: new Date().toISOString() };
-      const finalHistory = [...updatedHistory, aiMessage];
-      setChatHistory(finalHistory);
 
-      const convs = JSON.parse(localStorage.getItem('conversations') || '[]');
-      const updatedConversations = convs.map(conv => conv.id === currentConvId ? { ...conv, messages: finalHistory } : conv);
+      // Generate AI response
+      const genAI = new GoogleGenerativeAI("AIzaSyDkeJJpTY7YRucjjyI1tzWRS4dcpDjYjG0");
+      const genModel = genAI.getGenerativeModel({ model: selectedModel });
 
-      if (updatedHistory.length === 1) {
-        setIsGeneratingTitle(true);
-        const title = await generateConversationTitle(finalHistory);
-        updateConversationTitle(currentConvId, title);
-        setIsGeneratingTitle(false);
+      let prompt = message;
+      if (image) {
+        const imageData = await fileToGenerativePart(image);
+        const result = await genModel.generateContent([prompt, imageData]);
+        const response = await result.response;
+        const aiMessage = {
+          sender: 'Gemini',
+          text: response.text(),
+          timestamp: new Date()
+        };
+  setChatHistory(prev => [...prev, aiMessage]);
+  await addMessage(activeConversation, aiMessage);
       } else {
-        setConversations(updatedConversations);
-        localStorage.setItem('conversations', JSON.stringify(updatedConversations));
+        const result = await genModel.generateContent(prompt);
+        const response = await result.response;
+        const aiMessage = {
+          sender: 'Gemini',
+          text: response.text(),
+          timestamp: new Date()
+        };
+  setChatHistory(prev => [...prev, aiMessage]);
+  await addMessage(activeConversation, aiMessage);
+      }
+
+      // Update conversation timestamp
+      await updateConversationTimestamp(activeConversation);
+
+      // Generate title for new conversations
+      if (chatHistory.length === 0) {
+        setIsGeneratingTitle(true);
+        const title = await generateConversationTitle([userMessage]);
+        await updateConversationTitleHandler(activeConversation, title);
+        setIsGeneratingTitle(false);
       }
     } catch (error) {
-      console.error('API Error:', error);
-      setChatHistory(prev => [...prev, { sender: 'Gemini', text: `Sorry, I encountered an error: ${error.message}`, timestamp: new Date().toISOString() }]);
+      console.error('Error sending message:', error);
+      const errorMessage = {
+        sender: 'Gemini',
+        text: 'Sorry, I encountered an error. Please try again.',
+        timestamp: new Date()
+      };
+      setChatHistory(prev => [...prev, errorMessage]);
     } finally {
       setIsTyping(false);
     }
   };
 
+  const fileToGenerativePart = async (file) => {
+    const base64EncodedDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(',')[1]);
+      reader.readAsDataURL(file);
+    });
+    return {
+      inlineData: { data: await base64EncodedDataPromise, mimeType: file.type },
+    };
+  };
+
   const handleImageUpload = (e) => {
     const file = e.target.files[0];
     if (file) {
+      setImage(file);
       const reader = new FileReader();
-      reader.onload = (event) => {
-        setImage(event.target.result);
-        setImagePreview(URL.createObjectURL(file));
-      };
+      reader.onloadend = () => setImagePreview(reader.result);
       reader.readAsDataURL(file);
     }
   };
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
+    toast.success('Copied to clipboard!', {
+      icon: '📋',
+      style: {
+        borderRadius: '10px',
+        background: '#333',
+        color: '#fff',
+      },
+    });
   };
 
   const handleKeyDown = (e) => {
@@ -224,6 +402,29 @@ function App() {
     }
   };
 
+  const handleSignOut = async () => {
+    try {
+      await supabase.auth.signOut();
+      setUser(null);
+      setIsSignedIn(false);
+      navigate('/sign-in');
+    } catch (error) {
+      console.error('Error signing out:', error);
+    }
+  };
+
+  if (!isLoaded) {
+    return <div className="flex items-center justify-center min-h-screen">Loading...</div>;
+  }
+
+  if (!isSignedIn) {
+    navigate('/sign-in');
+    return null;
+  }
+
+  if (loading) {
+    return <div className="flex items-center justify-center min-h-screen">Loading conversations...</div>;
+  }
 
   return (
     <div className="flex flex-col md:flex-row h-screen font-sans bg-white text-gray-800">
@@ -231,11 +432,17 @@ function App() {
       <div className={`fixed md:relative z-30 bg-[#f0f4f9] transform ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 transition-transform duration-300 ease-in-out w-full md:w-68 h-screen md:h-auto`}>
         <div className="flex flex-col h-full p-3">
           <div className="flex justify-between items-center mb-4">
-            <button onClick={createNewConversation} className="flex-grow flex items-center gap-2 p-2 rounded-full text-sm font-medium hover:bg-gray-200">
+            <button
+              onClick={() => createNewConversation()}
+              className="flex-grow flex items-center gap-2 p-2 rounded-full text-sm font-medium hover:bg-gray-200"
+            >
               <FiPlus size={20} />
               New chat
             </button>
-            <button onClick={() => setMobileSidebarOpen(false)} className="p-1 rounded bg-blue-100  md:hidden">
+            <button
+              onClick={() => setMobileSidebarOpen(false)}
+              className="p-1 rounded bg-blue-100 md:hidden"
+            >
               <FiX size={20} />
             </button>
           </div>
@@ -250,12 +457,18 @@ function App() {
               >
                 <div className="flex flex-col flex-1 min-w-0">
                   <p className="m-0 p-0 truncate text-sm font-medium">{conv.title}</p>
-                  <span className="text-xs text-gray-400 truncate">{conv.createdAt ? new Date(conv.createdAt).toLocaleString() : ''}</span>
+                  <span className="text-xs text-gray-400 truncate">
+                    {/* {new Date(conv.updatedAt).toLocaleString()} */}
+
+                  </span>
                 </div>
                 {isGeneratingTitle && activeConversation === conv.id && (
                   <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin ml-2"></div>
                 )}
-                <button onClick={(e) => deleteConversation(conv.id, e)} className="p-1 rounded-full hover:bg-red-200 opacity-50 hover:opacity-100">
+                <button
+                  onClick={(e) => deleteConversationHandler(conv.id, e)}
+                  className="p-1 rounded-full hover:bg-red-200 opacity-50 hover:opacity-100"
+                >
                   <FiTrash2 size={16} />
                 </button>
               </div>
@@ -263,9 +476,18 @@ function App() {
           </div>
 
           <div className="pt-2">
-            <button className="w-full flex items-center gap-3 p-2 text-sm hover:bg-blue-100 rounded-full">
+            <div className="flex items-center gap-2 p-2 text-sm">
+              <div className="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-medium">
+                {user?.email?.charAt(0).toUpperCase() || 'U'}
+              </div>
+              <span className="font-medium">{user?.email}</span>
+            </div>
+            <button
+              onClick={handleSignOut}
+              className="w-full flex items-center gap-3 p-2 text-sm hover:bg-blue-100 rounded-full"
+            >
               <FiSettings size={18} />
-              <span>Settings and Help</span>
+              <span>Sign Out</span>
             </button>
           </div>
         </div>
@@ -273,12 +495,14 @@ function App() {
 
       {/* Main Content */}
       <div className="flex flex-col flex-1 h-screen overflow-hidden">
-
         {/* Chat Area */}
         <main ref={chatBoxRef} className="flex-1 overflow-y-auto py-2 px-3 sm:px-4 md:px-6">
           <div className="flex items-center justify-between mb-4">
             <div className="flex gap-2 items-center">
-              <button onClick={() => setMobileSidebarOpen(true)} className="p-2 rounded-full hover:bg-gray-200 md:hidden">
+              <button
+                onClick={() => setMobileSidebarOpen(true)}
+                className="p-2 rounded-full hover:bg-gray-200 md:hidden"
+              >
                 <FiMenu size={20} />
               </button>
               <div className="flex flex-col">
@@ -289,44 +513,49 @@ function App() {
                   onChange={e => setSelectedModel(e.target.value)}
                   style={{ minWidth: 150 }}
                 >
-                  <option value="gemini-1.5-flash">gemini-1.5-flash</option>
-                  {/* <option value="gemini-1.5-pro">gemini-1.5-pro</option> */}
-                  {/* <option value="gemini-2.5-flash">gemini-2.5-flash</option> */}
+                  <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                   <option value="gemini-2.5-pro">gemini-2.5-pro</option>
                 </select>
               </div>
             </div>
             <div>
-              <div className="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-medium">G</div>
+              <GeminiIcon />
             </div>
           </div>
 
           <div className="max-w-3xl mx-auto w-full">
-            {chatHistory.length === 0 ? (
+              {chatHistory.length === 0 ? (
               <div className="flex items-center justify-center h-72 text-center">
-                <h1 className="text-3xl font-medium text-[#6666ff]" style={{ color: "#6666ff" }}>Hello, User</h1>
+                <h1 className="text-3xl font-medium" style={{ color: "#6666ff" }}>Hello, {user?.name || user?.email || 'User'}</h1>
               </div>
             ) : (
-              chatHistory.map((msg, idx) => (
-                <div key={idx} className="flex gap-4 my-6">
+              chatHistory.map((msg) => (
+                <div key={msg._id || msg.id || (msg.timestamp ? new Date(msg.timestamp).toISOString() : Math.random())} className="flex gap-4 my-6">
                   <div className="flex-shrink-0">
                     {msg.sender === 'You' ? (
-                      <div className="w-8 h-8 rounded-full bg-blue-300 flex text-white items-center justify-center font-medium">G</div>
+                      <div className="w-8 h-8 rounded-full bg-blue-300 flex text-white items-center justify-center font-medium">
+                        {/* Use initial from name if available */}
+                        { (user?.name ? user.name.charAt(0) : user?.email?.charAt(0) || 'Y').toUpperCase() }
+                      </div>
                     ) : (
                       <GeminiIcon />
                     )}
                   </div>
                   <div className="flex flex-col w-full">
-                    {msg.image && <img src={msg.image} alt="upload" className="mt-2 rounded-lg max-w-xs" />}
+                    {msg.image && <img src={URL.createObjectURL(msg.image)} alt="upload" className="mt-2 rounded-lg max-w-xs" />}
                     <div className="prose prose-sm sm:prose-lg max-w-none text-gray-800">
                       <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
                         {msg.text}
                       </ReactMarkdown>
                     </div>
                     <div className="mt-2 flex items-center gap-2 text-gray-500 text-xs">
-                      <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      {/* <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span> */}
                       {msg.sender === 'Gemini' && (
-                        <button onClick={() => copyToClipboard(msg.text)} className="p-1 rounded-full hover:bg-gray-200" title="Copy">
+                        <button
+                          onClick={() => copyToClipboard(msg.text)}
+                          className="p-1 rounded-full hover:bg-gray-200"
+                          title="Copy"
+                        >
                           <FiCopy size={14} />
                         </button>
                       )}
@@ -355,13 +584,28 @@ function App() {
             {imagePreview && (
               <div className="relative w-24 h-24 mb-2">
                 <img src={imagePreview} alt="Preview" className="w-full h-full object-cover rounded-lg" />
-                <button onClick={() => { setImage(null); setImagePreview(null); }} className="absolute -top-2 -right-2 bg-gray-700 text-white rounded-full w-6 h-6 flex items-center justify-center text-lg">&times;</button>
+                <button
+                  onClick={() => { setImage(null); setImagePreview(null); }}
+                  className="absolute -top-2 -right-2 bg-gray-700 text-white rounded-full w-6 h-6 flex items-center justify-center text-lg"
+                >
+                  &times;
+                </button>
               </div>
             )}
 
             <div className="relative border border-gray-300 flex items-center p-2 bg-[#fff] rounded-3xl">
-              <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
-              <button onClick={() => fileInputRef.current.click()} title="Upload image" className="p-2 rounded-full hover:bg-gray-300">
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleImageUpload}
+                accept="image/*"
+                className="hidden"
+              />
+              <button
+                onClick={() => fileInputRef.current.click()}
+                title="Upload image"
+                className="p-2 rounded-full hover:bg-gray-300"
+              >
                 <FiImage size={20} />
               </button>
               <textarea
@@ -373,10 +617,18 @@ function App() {
                 rows={1}
                 className="flex-1 px-2 bg-transparent focus:outline-none resize-none max-h-48 text-sm"
               />
-              <button onClick={toggleVoiceInput} title="Use microphone" className={`p-2 rounded-full hover:bg-gray-300 ${isListening ? 'bg-red-500 text-white' : ''}`}>
+              <button
+                onClick={toggleVoiceInput}
+                title="Use microphone"
+                className={`p-2 rounded-full hover:bg-gray-300 ${isListening ? 'bg-red-500 text-white' : ''}`}
+              >
                 <FiMic size={20} />
               </button>
-              <button onClick={handleSend} disabled={isTyping || (!message.trim() && !image)} className="p-2 rounded-full disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-300">
+              <button
+                onClick={handleSend}
+                disabled={isTyping || (!message.trim() && !image)}
+                className="p-2 rounded-full disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-300"
+              >
                 <FiSend size={20} />
               </button>
             </div>
@@ -390,4 +642,4 @@ function App() {
   );
 }
 
-export default App;                                               
+export default App;
