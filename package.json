@@ -2,7 +2,7 @@
   "name": "GEMINICLONE",
   "version": "0.1.0",
   "private": true,
-  "proxy": "http://localhost:3000/",
+  "proxy": "https://gemini-girdhar.netlify.app/",
   "dependencies": {
     
     "@google-cloud/local-auth": "^3.0.1",

@@ -2,7 +2,7 @@ import React from 'react';
 
 const SignInPage = () => {
   const handleGoogleSignIn = () => {
-    const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+    const apiUrl = process.env.REACT_APP_API_URL || 'https://gemini-clone-yp44.onrender.com/api';
     // Redirect to backend OAuth start endpoint
     window.location.href = `${apiUrl}/auth/google`;
   };

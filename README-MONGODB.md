@@ -37,7 +37,7 @@ The project uses these environment files:
 **Frontend (.env):**
 ```
 REACT_APP_API=your_gemini_api_key
-REACT_APP_API_URL=http://localhost:5000/api
+REACT_APP_API_URL=https://gemini-clone-yp44.onrender.com/api
 REACT_APP_ENVIRONMENT=development
 ```
 
@@ -46,7 +46,7 @@ REACT_APP_ENVIRONMENT=development
 MONGODB_URI=mongodb://localhost:27017/geminiclone
 JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
 PORT=5000
-CLIENT_URL=http://localhost:3000
+CLIENT_URL=https://gemini-girdhar.netlify.app
 NODE_ENV=development
 ```
 

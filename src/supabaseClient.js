@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Get API configuration from environment variables
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+const API_URL = process.env.REACT_APP_API_URL || 'https://gemini-clone-yp44.onrender.com/api';
 
 // Create axios instance with default config
 const apiClient = axios.create({

@@ -7,7 +7,7 @@ require('../config/passport'); // ensures strategy is registered
 
 const router = express.Router();
 
-const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
+const CLIENT_URL = process.env.CLIENT_URL || 'https://gemini-girdhar.netlify.app';
 
 // Sign up
 router.post('/signup', async (req, res) => {
