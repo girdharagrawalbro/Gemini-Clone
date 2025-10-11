@@ -17,6 +17,11 @@ app.use(cors({
     origin: process.env.CLIENT_URL || 'https://gemini-girdhar.netlify.app',
     credentials: true
 }));
+
+// If the app is running behind a proxy (like Heroku, Render, Netlify functions, etc.)
+// trust the proxy so req.protocol and other proxy-related values are correct.
+// This is important when Google validates the redirect URI (http vs https).
+app.set('trust proxy', true);
 app.use(express.json());
 app.use(passport.initialize());
 // If you plan to use sessions (not necessary for JWT flow):
@@ -59,5 +64,11 @@ startServer().catch(error => {
     console.error('Failed to start server:', error);
     process.exit(1);
 });
+
+// Log environment information helpful for OAuth redirect issues
+console.log('OAuth configuration:');
+console.log('  GOOGLE_CALLBACK_URL=', process.env.GOOGLE_CALLBACK_URL);
+console.log('  BACKEND_URL=', process.env.BACKEND_URL);
+console.log('  CLIENT_URL=', process.env.CLIENT_URL);
 
 module.exports = app;

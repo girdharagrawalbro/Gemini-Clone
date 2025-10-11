@@ -2,10 +2,15 @@ const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const User = require('../models/User');
 
+// Allow configuring the full callback URL via environment variable to avoid redirect_uri_mismatch
+const callbackFromEnv = process.env.GOOGLE_CALLBACK_URL;
+const backendUrl = process.env.BACKEND_URL;
+const defaultCallback = callbackFromEnv || (backendUrl ? `${backendUrl.replace(/\/$/, '')}/api/auth/google/callback` : 'http://localhost:5000/api/auth/google/callback');
+
 passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: "/api/auth/google/callback"
+    callbackURL: defaultCallback
 }, async (accessToken, refreshToken, profile, done) => {
     try {
         // Check if user already exists with this Google ID
