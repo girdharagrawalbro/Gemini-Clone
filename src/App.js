@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import { format, formatDistanceToNow, isValid } from 'date-fns';
 import { FiSend, FiCopy, FiMic, FiTrash2, FiMenu, FiX, FiImage, FiPlus, FiSettings } from 'react-icons/fi';
-import { supabase, apiClient } from './supabaseClient';
+import { authService, apiClient } from './services/api';
 import { useNavigate } from 'react-router-dom';
 import {
   getConversations,
@@ -15,7 +15,7 @@ import {
   getMessages,
   addMessage,
   updateConversationTimestamp
-} from './services/supabaseService';
+} from './services/conversationService';
 import toast from 'react-hot-toast';
 
 // Gemini Icon Component
@@ -87,7 +87,7 @@ function App() {
   // Load conversations when user is authenticated
   useEffect(() => {
     const initSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: { session } } = await authService.getSession();
       if (session && session.user) {
         setUser(session.user);
         // Persist user (include name/profilePicture) to localStorage
@@ -102,7 +102,7 @@ function App() {
     };
     initSession();
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, payload) => {
+    const { data: listener } = authService.onAuthStateChange((_event, payload) => {
       if (payload && payload.user) {
         setUser(payload.user);
         try { localStorage.setItem('user', JSON.stringify(payload.user)); } catch (e) { /* ignore */ }
@@ -116,7 +116,7 @@ function App() {
     });
 
     // no-op unsubscribe (our implementation returns a mock)
-    return () => {};
+    return () => { };
   }, []);
 
   // Scroll to bottom when chat history changes
@@ -213,7 +213,7 @@ function App() {
     const firstUserMessage = firstUserMsgObj?.text ?? firstUserMsgObj?.content ?? firstUserMsgObj?.text ?? null;
     if (!firstUserMessage) return 'New Chat';
     try {
-      const genAI = new GoogleGenerativeAI("AIzaSyDkeJJpTY7YRucjjyI1tzWRS4dcpDjYjG0");
+      const genAI = new GoogleGenerativeAI(process.env.REACT_APP_API);
       const genModel = genAI.getGenerativeModel({ model: selectedModel });
       const prompt = `Generate a very short title (3-4 words max) for this conversation starter: "${firstUserMessage}"`;
       const result = await genModel.generateContent(prompt);
@@ -312,7 +312,7 @@ function App() {
       }
 
       // Generate AI response
-      const genAI = new GoogleGenerativeAI("AIzaSyDkeJJpTY7YRucjjyI1tzWRS4dcpDjYjG0");
+      const genAI = new GoogleGenerativeAI(process.env.REACT_APP_API);
       const genModel = genAI.getGenerativeModel({ model: selectedModel });
 
       let prompt = message;
@@ -325,8 +325,8 @@ function App() {
           text: response.text(),
           timestamp: new Date()
         };
-  setChatHistory(prev => [...prev, aiMessage]);
-  await addMessage(activeConversation, aiMessage);
+        setChatHistory(prev => [...prev, aiMessage]);
+        await addMessage(activeConversation, aiMessage);
       } else {
         const result = await genModel.generateContent(prompt);
         const response = await result.response;
@@ -335,8 +335,8 @@ function App() {
           text: response.text(),
           timestamp: new Date()
         };
-  setChatHistory(prev => [...prev, aiMessage]);
-  await addMessage(activeConversation, aiMessage);
+        setChatHistory(prev => [...prev, aiMessage]);
+        await addMessage(activeConversation, aiMessage);
       }
 
       // Update conversation timestamp
@@ -404,7 +404,7 @@ function App() {
 
   const handleSignOut = async () => {
     try {
-      await supabase.auth.signOut();
+      await authService.signOut();
       setUser(null);
       setIsSignedIn(false);
       navigate('/sign-in');
@@ -524,7 +524,7 @@ function App() {
           </div>
 
           <div className="max-w-3xl mx-auto w-full">
-              {chatHistory.length === 0 ? (
+            {chatHistory.length === 0 ? (
               <div className="flex items-center justify-center h-72 text-center">
                 <h1 className="text-3xl font-medium" style={{ color: "#6666ff" }}>Hello, {user?.name || user?.email || 'User'}</h1>
               </div>
@@ -535,7 +535,7 @@ function App() {
                     {msg.sender === 'You' ? (
                       <div className="w-8 h-8 rounded-full bg-blue-300 flex text-white items-center justify-center font-medium">
                         {/* Use initial from name if available */}
-                        { (user?.name ? user.name.charAt(0) : user?.email?.charAt(0) || 'Y').toUpperCase() }
+                        {(user?.name ? user.name.charAt(0) : user?.email?.charAt(0) || 'Y').toUpperCase()}
                       </div>
                     ) : (
                       <GeminiIcon />
